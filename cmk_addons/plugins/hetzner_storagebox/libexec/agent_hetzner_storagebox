@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+
+import argparse
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--username", required=True)
+    parser.add_argument("--password", required=True)
+    parser.add_argument("--timeout", type=int, default=10)
+    parser.add_argument("--insecure", action="store_true")
+    args = parser.parse_args()
+
+    # Replace this with real API logic.
+    value = 42
+
+    print("<<<hetzner_storagebox>>>")
+    print(f"ok|{value}")
+
+
+if __name__ == "__main__":
+    main()

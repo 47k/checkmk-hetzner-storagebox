@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# CheckMK
+*.mkp
+
+# Editor
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Temporary
+*.tmp
+*.swp

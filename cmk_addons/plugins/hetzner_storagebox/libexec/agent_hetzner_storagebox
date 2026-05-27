@@ -1,23 +1,402 @@
 #!/usr/bin/env python3
+"""Checkmk special agent for Hetzner Storage Boxes."""
+
+from __future__ import annotations
 
 import argparse
+import json
+import socket
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+DEFAULT_API_URL = "https://api.hetzner.com/v1"
+SECTION_NAME = "hetzner_storagebox"
+USER_AGENT = "checkmk-hetzner-storagebox/0.1"
+MAX_PAGES = 10000
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--url", required=True)
-    parser.add_argument("--username", required=True)
-    parser.add_argument("--password", required=True)
-    parser.add_argument("--timeout", type=int, default=10)
-    parser.add_argument("--insecure", action="store_true")
-    args = parser.parse_args()
+class AgentError(Exception):
+    """Structured error that can be emitted as agent data."""
 
-    # Replace this with real API logic.
-    value = 42
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
-    print("<<<hetzner_storagebox>>>")
-    print(f"ok|{value}")
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--api-token", required=True, help="Hetzner Console API token")
+    parser.add_argument("--api-url", default=DEFAULT_API_URL, help=f"API base URL, default {DEFAULT_API_URL}")
+    parser.add_argument("--timeout", type=int, default=10, help="HTTP timeout in seconds")
+    parser.add_argument(
+        "--box-id",
+        action="append",
+        default=[],
+        help="Storage Box ID filter. Can be specified repeatedly or as a comma-separated list.",
+    )
+    parser.add_argument(
+        "--fetch-subaccounts",
+        dest="fetch_subaccounts",
+        action="store_true",
+        default=True,
+        help="Fetch subaccounts per Storage Box to expose subaccounts_count.",
+    )
+    parser.add_argument(
+        "--no-fetch-subaccounts",
+        dest="fetch_subaccounts",
+        action="store_false",
+        help="Do not fetch subaccounts per Storage Box.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Include additional safe error context")
+    return parser.parse_args()
+
+
+def emit_section(storage_boxes: list[dict[str, Any]], errors: list[dict[str, str]]) -> None:
+    payload = {"storage_boxes": storage_boxes, "errors": errors}
+    print(f"<<<{SECTION_NAME}:sep(0)>>>")
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def resolve_api_token(raw_token: str) -> str:
+    """Resolve Checkmk password-store references while accepting plain tokens."""
+
+    if ":" not in raw_token:
+        return raw_token
+
+    password_id, password_file = raw_token.split(":", 1)
+    if not password_id or not password_file.startswith("/"):
+        return raw_token
+
+    try:
+        from cmk.utils.password_store import lookup
+
+        return lookup(Path(password_file), password_id)
+    except Exception as exc:
+        raise AgentError("secret_error", "Unable to resolve API token from the Checkmk password store") from exc
+
+
+def sanitize_message(message: str, api_token: str) -> str:
+    if api_token:
+        return message.replace(api_token, "<redacted>")
+    return message
+
+
+def normalize_box_ids(raw_values: list[str]) -> set[str]:
+    box_ids: set[str] = set()
+    for raw_value in raw_values:
+        for part in raw_value.split(","):
+            normalized = part.strip()
+            if normalized:
+                box_ids.add(normalized)
+    return box_ids
+
+
+def request_json(url: str, api_token: str, timeout: int) -> dict[str, Any] | list[Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_token}",
+            "User-Agent": USER_AGENT,
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw_body = response.read()
+    except urllib.error.HTTPError as exc:
+        body = _read_http_error_body(exc)
+        reason = exc.reason or "HTTP error"
+        detail = f": {body}" if body else ""
+        code = "auth_error" if exc.code in (401, 403) else "http_error"
+        raise AgentError(code, f"HTTP {exc.code} {reason} while fetching {url}{detail}") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        code = "timeout" if isinstance(reason, (socket.timeout, TimeoutError)) else "network_error"
+        raise AgentError(code, f"Unable to fetch {url}: {exc}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        code = "timeout"
+        raise AgentError(code, f"Unable to fetch {url}: {exc}") from exc
+
+    try:
+        decoded = raw_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentError("decode_error", f"API response from {url} is not valid UTF-8") from exc
+
+    try:
+        parsed: dict[str, Any] | list[Any] = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise AgentError("json_error", f"API response from {url} is not valid JSON: {exc}") from exc
+
+    return parsed
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw_body = exc.read()
+    except Exception:
+        return ""
+
+    try:
+        body = raw_body.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+    if not body:
+        return ""
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return body[:300]
+
+    if isinstance(parsed, dict):
+        for key in ("message", "error", "detail"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value:
+                return value[:300]
+    return body[:300]
+
+
+def extract_collection(
+    payload: dict[str, Any] | list[Any],
+    field_name: str,
+    resource_name: str,
+    fallback_field_names: tuple[str, ...] = (),
+    missing_field_is_empty: bool = True,
+) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        raw_entries = payload
+    elif isinstance(payload, dict):
+        raw_entries: Any = None
+        for candidate in (field_name, *fallback_field_names):
+            if candidate in payload:
+                raw_entries = payload.get(candidate, [])
+                break
+        if raw_entries is None:
+            if not missing_field_is_empty:
+                raise AgentError("api_response_error", f"API response field '{field_name}' is missing")
+            raw_entries = []
+    else:
+        raise AgentError("api_response_error", "API response has an unexpected top-level type")
+
+    if not isinstance(raw_entries, list):
+        raise AgentError("api_response_error", f"API response field '{field_name}' is not a list")
+
+    entries: list[dict[str, Any]] = []
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, dict):
+            raise AgentError("api_response_error", f"{resource_name} entry at index {index} is not an object")
+        entries.append(raw_entry)
+    return entries
+
+
+def next_page_from_payload(payload: dict[str, Any] | list[Any], current_page: int) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+
+    pagination = payload.get("pagination")
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        pagination = meta.get("pagination", pagination)
+
+    if not isinstance(pagination, dict):
+        return None
+
+    next_page = _to_int(pagination.get("next_page"))
+    if next_page is not None:
+        return next_page
+
+    last_page = _to_int(pagination.get("last_page"))
+    page = _to_int(pagination.get("page")) or current_page
+    if last_page is not None and page < last_page:
+        return page + 1
+
+    return None
+
+
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def with_page_parameter(url: str, page: int) -> str:
+    parsed_url = urllib.parse.urlparse(url)
+    query = dict(urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True))
+    query["page"] = str(page)
+    return urllib.parse.urlunparse(parsed_url._replace(query=urllib.parse.urlencode(query)))
+
+
+def fetch_collection(
+    api_url: str,
+    path: str,
+    field_name: str,
+    resource_name: str,
+    api_token: str,
+    timeout: int,
+    fallback_field_names: tuple[str, ...] = (),
+    missing_field_is_empty: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    endpoint = f"{api_url.rstrip('/')}/{path.lstrip('/')}"
+    entries: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    seen_pages: set[int] = set()
+    page = 1
+
+    while True:
+        if page in seen_pages:
+            errors.append(AgentError("pagination_error", f"Pagination loop detected at page {page}").as_dict())
+            break
+        if len(seen_pages) >= MAX_PAGES:
+            errors.append(AgentError("pagination_error", f"Pagination exceeded {MAX_PAGES} pages").as_dict())
+            break
+
+        seen_pages.add(page)
+        url = endpoint if page == 1 else with_page_parameter(endpoint, page)
+
+        try:
+            payload = request_json(url, api_token, timeout)
+            entries.extend(
+                extract_collection(
+                    payload,
+                    field_name,
+                    resource_name,
+                    fallback_field_names,
+                    missing_field_is_empty,
+                )
+            )
+        except AgentError as exc:
+            errors.append(exc.as_dict())
+            break
+
+        next_page = next_page_from_payload(payload, page)
+        if next_page is None:
+            break
+        page = next_page
+
+    return entries, errors
+
+
+def fetch_storage_boxes(api_url: str, api_token: str, timeout: int) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return fetch_collection(
+        api_url=api_url,
+        path="storage_boxes",
+        field_name="storage_boxes",
+        resource_name="Storage Box",
+        api_token=api_token,
+        timeout=timeout,
+    )
+
+
+def fetch_subaccounts(
+    api_url: str,
+    api_token: str,
+    timeout: int,
+    storage_box_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    quoted_id = urllib.parse.quote(storage_box_id, safe="")
+    return fetch_collection(
+        api_url=api_url,
+        path=f"storage_boxes/{quoted_id}/subaccounts",
+        field_name="subaccounts",
+        resource_name="Storage Box subaccount",
+        api_token=api_token,
+        timeout=timeout,
+        fallback_field_names=("storage_box_subaccounts",),
+        missing_field_is_empty=False,
+    )
+
+
+def enrich_storage_boxes_with_subaccount_counts(
+    storage_boxes: list[dict[str, Any]],
+    api_url: str,
+    api_token: str,
+    timeout: int,
+) -> None:
+    for storage_box in storage_boxes:
+        storage_box_id = storage_box.get("id")
+        if storage_box_id in (None, ""):
+            storage_box["subaccounts_error"] = {
+                "code": "subaccounts_error",
+                "message": "Unable to fetch subaccounts: Storage Box ID is missing",
+            }
+            continue
+
+        subaccounts, errors = fetch_subaccounts(api_url, api_token, timeout, str(storage_box_id))
+        if errors:
+            storage_box["subaccounts_error"] = _subaccounts_error(str(storage_box_id), errors)
+            continue
+
+        storage_box["subaccounts_count"] = len(subaccounts)
+
+
+def _subaccounts_error(storage_box_id: str, errors: list[dict[str, str]]) -> dict[str, str]:
+    first_error = errors[0] if errors else {"code": "error", "message": "Unknown subaccount API error"}
+    code = first_error.get("code") or "error"
+    message = first_error.get("message") or "Unknown subaccount API error"
+    suffix = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+    return {
+        "code": f"subaccounts_{code}",
+        "message": f"Unable to fetch subaccounts for Storage Box {storage_box_id}: {message}{suffix}",
+    }
+
+
+def sanitize_storage_box_errors(storage_boxes: list[dict[str, Any]], api_token: str) -> None:
+    for storage_box in storage_boxes:
+        raw_error = storage_box.get("subaccounts_error")
+        if not isinstance(raw_error, dict):
+            continue
+        raw_error["code"] = str(raw_error.get("code") or "subaccounts_error")
+        raw_error["message"] = sanitize_message(str(raw_error.get("message") or "Subaccount API error"), api_token)
+
+
+def filter_storage_boxes(storage_boxes: list[dict[str, Any]], box_ids: set[str]) -> list[dict[str, Any]]:
+    if not box_ids:
+        return storage_boxes
+
+    return [storage_box for storage_box in storage_boxes if str(storage_box.get("id", "")) in box_ids]
+
+
+def main() -> int:
+    args = parse_arguments()
+    api_token = ""
+    errors: list[dict[str, str]] = []
+    storage_boxes: list[dict[str, Any]] = []
+
+    try:
+        api_token = resolve_api_token(args.api_token)
+        storage_boxes, errors = fetch_storage_boxes(args.api_url, api_token, args.timeout)
+        storage_boxes = filter_storage_boxes(storage_boxes, normalize_box_ids(args.box_id))
+        if args.fetch_subaccounts:
+            enrich_storage_boxes_with_subaccount_counts(storage_boxes, args.api_url, api_token, args.timeout)
+        sanitize_storage_box_errors(storage_boxes, api_token)
+        errors = [
+            {"code": error.get("code", "error"), "message": sanitize_message(error.get("message", ""), api_token)}
+            for error in errors
+        ]
+    except AgentError as exc:
+        errors = [{"code": exc.code, "message": sanitize_message(exc.message, api_token)}]
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}" if args.debug else str(exc)
+        message = sanitize_message(message, api_token)
+        errors = [{"code": "unexpected_error", "message": message or "Unexpected agent error"}]
+
+    emit_section(storage_boxes, errors)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

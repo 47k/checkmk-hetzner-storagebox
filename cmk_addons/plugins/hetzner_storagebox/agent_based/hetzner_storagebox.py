@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, TypedDict
 
 from cmk.agent_based.v2 import AgentSection, CheckPlugin, Metric, Result, Service, State
@@ -22,6 +22,11 @@ class ErrorInfo(TypedDict):
 class Section(TypedDict):
     boxes: dict[str, dict[str, Any]]
     errors: list[ErrorInfo]
+
+
+class DisplayField(TypedDict):
+    text: str
+    state: State
 
 
 def parse_hetzner_storagebox(string_table: list[list[str]]) -> Section | None:
@@ -112,10 +117,11 @@ def check_hetzner_storagebox(item: str, params: Mapping[str, Any], section: Sect
         return
 
     storage_box = section["boxes"].get(item)
+    api_error_state = _state_from_params(params, "api_error_state", State.UNKNOWN)
     if storage_box is None:
         if section["errors"]:
             yield Result(
-                state=_state_from_params(params, "api_error_state", State.UNKNOWN),
+                state=api_error_state,
                 summary=_format_errors(section["errors"]),
             )
             return
@@ -143,50 +149,27 @@ def check_hetzner_storagebox(item: str, params: Mapping[str, Any], section: Sect
 
     usage_percent = _usage_percent(used_bytes, total_bytes)
     usage_state = _usage_state(usage_percent, usage_levels)
-    overall_state = _worst_state(status_state, usage_state)
-
-    yield Result(
-        state=overall_state,
-        summary=_summary(
-            status=status,
-            used_bytes=used_bytes,
-            total_bytes=total_bytes,
-            usage_percent=usage_percent,
-            snapshots_bytes=snapshots_bytes,
-            snapshots_count=snapshots_count,
-            subaccounts_count=subaccounts_count,
-        ),
-        details=_details(
-            status=status,
-            used_bytes=used_bytes,
-            total_bytes=total_bytes,
-            usage_percent=usage_percent,
-            snapshots_bytes=snapshots_bytes,
-            snapshots_count=snapshots_count,
-            subaccounts_count=subaccounts_count,
-            snapshot_size_violation=snapshot_size_violation,
-            snapshot_count_violation=snapshot_count_violation,
-            subaccounts_count_violation=subaccounts_count_violation,
-        ),
-    )
-
-    if section["errors"]:
-        yield Result(state=_state_from_params(params, "api_error_state", State.UNKNOWN), summary=_format_errors(section["errors"]))
-
-    if subaccounts_error is not None:
-        yield Result(
-            state=_state_from_params(params, "api_error_state", State.UNKNOWN),
-            summary=_format_error("Subaccount API error", subaccounts_error),
-        )
-
-    yield from _threshold_results(
+    subaccounts_error_state = api_error_state if subaccounts_error is not None else State.OK
+    fields = _display_fields(
+        status=status,
+        status_state=status_state,
+        used_bytes=used_bytes,
+        total_bytes=total_bytes,
+        usage_percent=usage_percent,
+        usage_state=usage_state,
         snapshots_bytes=snapshots_bytes,
         snapshots_count=snapshots_count,
         subaccounts_count=subaccounts_count,
         snapshot_size_violation=snapshot_size_violation,
         snapshot_count_violation=snapshot_count_violation,
         subaccounts_count_violation=subaccounts_count_violation,
+        subaccounts_error_state=subaccounts_error_state,
+        api_errors=section["errors"],
+        api_error_state=api_error_state,
     )
+
+    for field in fields:
+        yield Result(state=field["state"], summary=field["text"])
 
     yield from _metrics(
         usage_levels=usage_levels,
@@ -204,8 +187,7 @@ def check_hetzner_storagebox(item: str, params: Mapping[str, Any], section: Sect
 
 
 def _format_errors(errors: list[ErrorInfo]) -> str:
-    first_error = errors[0]
-    summary = _format_error("API error", first_error)
+    summary = _format_error("API error", errors[0])
     if len(errors) > 1:
         summary += f" (+{len(errors) - 1} more)"
     return summary
@@ -215,116 +197,70 @@ def _format_error(prefix: str, error: ErrorInfo) -> str:
     return f"{prefix} ({error['code']}): {error['message']}"
 
 
-def _summary(
+def _display_fields(
     *,
     status: str,
+    status_state: State,
     used_bytes: float | None,
     total_bytes: float | None,
     usage_percent: float | None,
-    snapshots_bytes: float | None,
-    snapshots_count: float | None,
-    subaccounts_count: float | None,
-) -> str:
-    parts: list[str] = []
-    if used_bytes is not None and total_bytes not in (None, 0) and usage_percent is not None:
-        parts.append(f"Used {usage_percent:.1f}% ({_format_bytes(used_bytes)} / {_format_bytes(total_bytes)})")
-    else:
-        parts.append("Usage data incomplete")
-
-    parts.append(f"Status: {_format_status(status)}")
-
-    if snapshots_bytes is not None:
-        parts.append(f"Snapshot size {_format_bytes(snapshots_bytes)}")
-
-    if snapshots_count is not None:
-        parts.append(f"Snapshot count {_format_count(snapshots_count)}")
-    else:
-        parts.append("Snapshot count n/a")
-
-    if subaccounts_count is not None:
-        parts.append(f"Subaccounts {_format_count(subaccounts_count)}")
-    else:
-        parts.append("Subaccounts n/a")
-
-    return ", ".join(parts)
-
-
-def _details(
-    *,
-    status: str,
-    used_bytes: float | None,
-    total_bytes: float | None,
-    usage_percent: float | None,
+    usage_state: State,
     snapshots_bytes: float | None,
     snapshots_count: float | None,
     subaccounts_count: float | None,
     snapshot_size_violation: LevelViolation | None,
     snapshot_count_violation: LevelViolation | None,
     subaccounts_count_violation: LevelViolation | None,
-) -> str:
-    lines: list[str] = []
+    subaccounts_error_state: State,
+    api_errors: list[ErrorInfo],
+    api_error_state: State,
+) -> list[DisplayField]:
+    parts: list[DisplayField] = []
     if used_bytes is not None and total_bytes not in (None, 0) and usage_percent is not None:
-        lines.append(f"Used {usage_percent:.1f}% ({_format_bytes(used_bytes)} / {_format_bytes(total_bytes)})")
+        parts.append(
+            _display_field(
+                f"Used {usage_percent:.1f}% ({_format_bytes(used_bytes)} / {_format_bytes(total_bytes)})",
+                usage_state,
+            )
+        )
     else:
-        lines.append("Usage data incomplete")
+        parts.append(_display_field("Usage data incomplete", usage_state))
 
-    lines.append(f"Status: {_format_status(status)}")
+    parts.append(_display_field(f"Status: {_format_status(status)}", status_state))
 
     if snapshots_bytes is not None:
-        lines.append(_detail_line("Snapshot size", _format_bytes(snapshots_bytes), snapshot_size_violation, _format_bytes))
+        parts.append(
+            _display_field("Snapshot size " + _format_bytes(snapshots_bytes), _violation_state(snapshot_size_violation))
+        )
 
     if snapshots_count is not None:
-        lines.append(
-            _detail_line("Snapshot count", _format_count(snapshots_count), snapshot_count_violation, _format_count)
+        parts.append(
+            _display_field("Snapshot count " + _format_count(snapshots_count), _violation_state(snapshot_count_violation))
         )
     else:
-        lines.append("Snapshot count n/a")
+        parts.append(_display_field("Snapshot count n/a"))
 
     if subaccounts_count is not None:
-        lines.append(
-            _detail_line("Subaccounts", _format_count(subaccounts_count), subaccounts_count_violation, _format_count)
+        parts.append(
+            _display_field(
+                "Subaccounts " + _format_count(subaccounts_count),
+                _worst_state(_violation_state(subaccounts_count_violation), subaccounts_error_state),
+            )
         )
     else:
-        lines.append("Subaccounts n/a")
+        parts.append(_display_field("Subaccounts n/a", subaccounts_error_state))
 
-    return "\n".join(lines)
+    if api_errors:
+        text = _format_error("API error", api_errors[0])
+        if len(api_errors) > 1:
+            text += f" (+{len(api_errors) - 1} more)"
+        parts.append(_display_field(text, api_error_state))
 
-
-def _detail_line(
-    label: str,
-    value_text: str,
-    violation: LevelViolation | None,
-    level_formatter: Callable[[float], str],
-) -> str:
-    if violation is None:
-        return f"{label} {value_text}"
-    state, level = violation
-    return f"{label}: {value_text} ({_state_name(state)} >= {level_formatter(level)})"
+    return parts
 
 
-def _threshold_results(
-    *,
-    snapshots_bytes: float | None,
-    snapshots_count: float | None,
-    subaccounts_count: float | None,
-    snapshot_size_violation: LevelViolation | None,
-    snapshot_count_violation: LevelViolation | None,
-    subaccounts_count_violation: LevelViolation | None,
-) -> Iterable[Result]:
-    if snapshots_bytes is not None and snapshot_size_violation is not None:
-        state, level = snapshot_size_violation
-        message = f"Snapshot size: {_format_bytes(snapshots_bytes)} ({_state_name(state)} >= {_format_bytes(level)})"
-        yield Result(state=state, notice=message, details=message)
-
-    if snapshots_count is not None and snapshot_count_violation is not None:
-        state, level = snapshot_count_violation
-        message = f"Snapshot count: {_format_count(snapshots_count)} ({_state_name(state)} >= {_format_count(level)})"
-        yield Result(state=state, notice=message, details=message)
-
-    if subaccounts_count is not None and subaccounts_count_violation is not None:
-        state, level = subaccounts_count_violation
-        message = f"Subaccounts: {_format_count(subaccounts_count)} ({_state_name(state)} >= {_format_count(level)})"
-        yield Result(state=state, notice=message, details=message)
+def _display_field(text: str, state: State = State.OK) -> DisplayField:
+    return {"text": text, "state": state}
 
 
 def _metrics(
@@ -417,6 +353,13 @@ def _level_violation(value: float | None, levels: Levels | None) -> LevelViolati
     return None
 
 
+def _violation_state(violation: LevelViolation | None) -> State:
+    if violation is None:
+        return State.OK
+    state, _level = violation
+    return state
+
+
 def _number_at(data: Mapping[str, Any], path: tuple[str, ...]) -> float | None:
     value: Any = data
     for key in path:
@@ -470,15 +413,6 @@ def _state_from_params(params: Mapping[str, Any], key: str, default: State) -> S
 def _worst_state(*states: State) -> State:
     ranking = {State.OK: 0, State.WARN: 1, State.UNKNOWN: 2, State.CRIT: 3}
     return max(states, key=lambda state: ranking[state])
-
-
-def _state_name(state: State) -> str:
-    return {
-        State.OK: "OK",
-        State.WARN: "WARN",
-        State.CRIT: "CRIT",
-        State.UNKNOWN: "UNKNOWN",
-    }[state]
 
 
 def _format_status(status: str) -> str:

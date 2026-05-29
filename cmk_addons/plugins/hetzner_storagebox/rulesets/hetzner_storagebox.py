@@ -30,38 +30,40 @@ DEFAULT_API_URL = "https://api.hetzner.com/v1"
 
 HELP_STORAGE_USAGE_LEVELS = Help(
     "Monitors the used Storage Box capacity in percent. The value is calculated from "
-    "<tt>stats.size / storage_box_type.size</tt>. The default levels are WARN at 80% "
-    "and CRIT at 90%. This is useful for capacity planning."
+    "<tt>stats.size / storage_box_type.size</tt>. When this option is unchecked, "
+    "the effective default levels are WARN at 80% and CRIT at 90%. This is useful "
+    "for capacity planning."
 )
 HELP_SNAPSHOT_SIZE_LEVELS = Help(
     "Monitors the space used by snapshots based on <tt>stats.size_snapshots</tt>. "
-    "The levels are only evaluated when the API provides this value. Leave this "
-    "option unset to disable alerting for snapshot size."
+    "The levels are only evaluated when the API provides this value. Leave this option "
+    "unchecked to disable alerting for snapshot size."
 )
 HELP_SNAPSHOT_COUNT_LEVELS = Help(
     "Monitors the number of snapshots based on <tt>snapshots_count</tt>, if available. "
     "If the API does not provide this field, the check shows <i>Snapshot count n/a</i> "
-    "and does not alert. This value is not inferred from <tt>snapshot_limit</tt>."
+    "and does not alert. Leave this option unchecked to disable alerting for snapshot "
+    "count. This value is not inferred from <tt>snapshot_limit</tt>."
 )
 HELP_SUBACCOUNT_COUNT_LEVELS = Help(
     "Monitors the number of configured Storage Box subaccounts. The count is fetched "
     "from the Storage Box subaccounts API. If the subaccount endpoint cannot be "
     "queried, the count remains unavailable and the check reports the API subaccount "
-    "error separately. This can help detect unexpected growth or account sprawl."
+    "error separately. Leave this option unchecked to disable alerting for subaccount "
+    "count. This can help detect unexpected growth or account sprawl."
 )
 HELP_ACCESS_EXPECTATION = Help(
-    "Optionally checks the corresponding value from <tt>access_settings</tt>. Leave this set to "
-    "<i>Ignore / do not check</i> unless the access setting should be enforced. Missing API fields "
-    "are shown as <tt>n/a</tt> and do not alert."
+    "Optionally checks the corresponding value from <tt>access_settings</tt>. Leave this option "
+    "unchecked unless the access setting should be enforced. Missing API fields are shown as "
+    "<tt>n/a</tt> and do not alert."
 )
 HELP_ACCESS_MISMATCH_STATE = Help(
     "Controls the service state when one or more configured access settings differ from the "
     "expected value. The default is WARN."
 )
 HELP_DELETE_PROTECTION = Help(
-    "Optionally checks <tt>protection.delete</tt>. Leave this set to <i>Ignore / do not check</i> "
-    "unless delete protection should be enforced. Missing API fields are shown as <tt>n/a</tt> and "
-    "do not alert."
+    "Optionally checks <tt>protection.delete</tt>. Leave this option unchecked unless delete "
+    "protection should be enforced. Missing API fields are shown as <tt>n/a</tt> and do not alert."
 )
 HELP_DELETE_PROTECTION_STATE = Help(
     "Controls the service state when the configured delete protection expectation is not met. "
@@ -69,8 +71,8 @@ HELP_DELETE_PROTECTION_STATE = Help(
 )
 HELP_SNAPSHOT_PLAN = Help(
     "Optionally checks whether <tt>snapshot_plan</tt> is configured. A value of <tt>null</tt> means "
-    "no snapshot plan. Any non-null value means a plan is configured. Missing API fields are shown "
-    "as <tt>n/a</tt> and do not alert."
+    "no snapshot plan. Any non-null value means a plan is configured. Leave this option unchecked "
+    "to ignore the snapshot plan. Missing API fields are shown as <tt>n/a</tt> and do not alert."
 )
 HELP_SNAPSHOT_PLAN_STATE = Help(
     "Controls the service state when the configured snapshot plan requirement is not met. "
@@ -79,12 +81,12 @@ HELP_SNAPSHOT_PLAN_STATE = Help(
 HELP_SNAPSHOT_LIMIT_USAGE = Help(
     "Monitors <tt>snapshots_count</tt> as a percentage of <tt>storage_box_type.snapshot_limit</tt>. "
     "The levels are only evaluated when both values are available and the limit is greater than "
-    "zero. Leave this option unset to disable alerting."
+    "zero. Leave this option unchecked to disable alerting."
 )
 HELP_SUBACCOUNT_LIMIT_USAGE = Help(
     "Monitors <tt>subaccounts_count</tt> as a percentage of "
     "<tt>storage_box_type.subaccounts_limit</tt>. The levels are only evaluated when both values "
-    "are available and the limit is greater than zero. Leave this option unset to disable alerting."
+    "are available and the limit is greater than zero. Leave this option unchecked to disable alerting."
 )
 HELP_STATUS_STATE = Help(
     "Controls the service state when the Storage Box status is not active. The API "
@@ -181,12 +183,12 @@ def _expected_access_choice(title: Title, help_text: Help) -> SingleChoice:
     return SingleChoice(
         title=title,
         help_text=help_text,
-        prefill=DefaultValue("ignore"),
+        prefill=DefaultValue("enabled"),
         elements=(
-            SingleChoiceElement("ignore", Title("Ignore / do not check")),
             SingleChoiceElement("enabled", Title("Expected enabled")),
             SingleChoiceElement("disabled", Title("Expected disabled")),
         ),
+        ignored_elements=("ignore",),
     )
 
 
@@ -194,12 +196,12 @@ def _delete_protection_choice() -> SingleChoice:
     return SingleChoice(
         title=Title("Delete protection"),
         help_text=HELP_DELETE_PROTECTION,
-        prefill=DefaultValue("ignore"),
+        prefill=DefaultValue("enabled"),
         elements=(
-            SingleChoiceElement("ignore", Title("Ignore / do not check")),
             SingleChoiceElement("enabled", Title("Expected enabled")),
             SingleChoiceElement("disabled", Title("Expected disabled")),
         ),
+        ignored_elements=("ignore",),
     )
 
 
@@ -207,12 +209,12 @@ def _snapshot_plan_choice() -> SingleChoice:
     return SingleChoice(
         title=Title("Snapshot plan"),
         help_text=HELP_SNAPSHOT_PLAN,
-        prefill=DefaultValue("ignore"),
+        prefill=DefaultValue("configured"),
         elements=(
-            SingleChoiceElement("ignore", Title("Ignore / do not check")),
             SingleChoiceElement("configured", Title("Require configured snapshot plan")),
             SingleChoiceElement("none", Title("Require no snapshot plan")),
         ),
+        ignored_elements=("ignore",),
     )
 
 
@@ -221,33 +223,46 @@ def _check_parameter_form() -> Dictionary:
         title=Title("Hetzner Storage Box service parameters"),
         help_text=Help(
             "<b>Configure Hetzner Storage Box service monitoring</b><br>"
-            "This rule controls how Storage Box services are evaluated after the special agent has collected "
-            "data from the Hetzner Console API.<br>"
+            "This rule controls how Hetzner Storage Box services are evaluated after data has been collected "
+            "from the Hetzner Console API.<br>"
             "<br>"
-            "It defines:"
+            "<b>Default monitoring</b>"
             "<ul>"
-            "<li>Storage usage monitoring based on <tt>stats.size / storage_box_type.size</tt>.</li>"
-            "<li>Snapshot monitoring for snapshot size (<tt>stats.size_snapshots</tt>) and snapshot count "
-            "(<tt>snapshots_count</tt>).</li>"
-            "<li>Subaccount monitoring based on <tt>subaccounts_count</tt>.</li>"
-            "<li>Access setting drift checks for Samba, SSH, WebDAV, ZFS, and external reachability.</li>"
-            "<li>Delete protection monitoring based on <tt>protection.delete</tt>.</li>"
-            "<li>Snapshot plan monitoring based on <tt>snapshot_plan</tt>.</li>"
-            "<li>Snapshot and subaccount limit usage monitoring based on Storage Box type limits.</li>"
-            "<li>Severity handling for non-active Storage Box status values and API, authentication, or "
-            "network collection errors.</li>"
+            "<li>Storage usage based on <tt>stats.size</tt> and the Storage Box capacity.</li>"
+            "<li>Non-active Storage Box status handling.</li>"
+            "<li>API collection, authentication, and network error handling.</li>"
             "</ul>"
-            "Thresholds are state-neutral unless configured. Storage usage uses the default WARN and CRIT "
-            "thresholds unless changed or disabled; snapshot, subaccount, drift, protection, snapshot plan, "
-            "and limit usage checks are disabled or ignored unless configured.<br>"
+            "<b>Optional monitoring</b>"
+            "<ul>"
+            "<li>Snapshot size and snapshot count monitoring.</li>"
+            "<li>Subaccount count monitoring.</li>"
+            "<li>Access setting validation for Samba, SSH, WebDAV, ZFS, and external reachability.</li>"
+            "<li>Delete protection monitoring.</li>"
+            "<li>Snapshot plan monitoring.</li>"
+            "<li>Snapshot and subaccount limit usage monitoring.</li>"
+            "</ul>"
+            "<b>Default behavior</b>"
+            "<ul>"
+            "<li>Storage usage uses WARN at 80% and CRIT at 90% unless overridden.</li>"
+            "<li>Snapshot, subaccount, access-setting, delete-protection, snapshot-plan, and limit-usage "
+            "checks are disabled or ignored unless explicitly enabled.</li>"
+            "<li>Non-active Storage Box status defaults to WARN.</li>"
+            "<li>API collection errors default to UNKNOWN.</li>"
+            "</ul>"
+            "<b>Unavailable API fields</b>"
+            "<ul>"
+            "<li>If Hetzner does not provide an optional field, the service shows <tt>n/a</tt> and does not "
+            "alert for the missing value.</li>"
+            "<li>Missing optional values never trigger alerts by themselves.</li>"
+            "</ul>"
+            "<b>Severity handling</b><br>"
+            "Severity options are checkbox-enabled overrides. When they are not configured, the plugin uses "
+            "the effective defaults listed above."
             "<br>"
-            "If the API does not provide an optional field, the service shows it as <tt>n/a</tt> and does not "
-            "alert for that missing value. API or status problems are handled separately by the configured "
-            "severity settings."
         ),
         elements={
             "usage_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels(
                     title=Title("Storage usage"),
                     help_text=HELP_STORAGE_USAGE_LEVELS,
@@ -261,7 +276,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "snapshot_size_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels[int](
                     title=Title("Snapshot size"),
                     help_text=HELP_SNAPSHOT_SIZE_LEVELS,
@@ -281,7 +296,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "snapshot_count_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels[int](
                     title=Title("Snapshot count"),
                     help_text=HELP_SNAPSHOT_COUNT_LEVELS,
@@ -296,7 +311,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "subaccounts_count_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels[int](
                     title=Title("Subaccount count"),
                     help_text=HELP_SUBACCOUNT_COUNT_LEVELS,
@@ -311,30 +326,30 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "expected_samba_access": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_expected_access_choice(Title("Expected Samba access"), HELP_ACCESS_EXPECTATION),
             ),
             "expected_ssh_access": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_expected_access_choice(Title("Expected SSH access"), HELP_ACCESS_EXPECTATION),
             ),
             "expected_webdav_access": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_expected_access_choice(Title("Expected WebDAV access"), HELP_ACCESS_EXPECTATION),
             ),
             "expected_zfs_access": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_expected_access_choice(Title("Expected ZFS access"), HELP_ACCESS_EXPECTATION),
             ),
             "expected_external_reachability": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_expected_access_choice(
                     Title("Expected external reachability"),
                     HELP_ACCESS_EXPECTATION,
                 ),
             ),
             "access_mismatch_state": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_severity_choice(
                     Title("Severity for access setting mismatches"),
                     "WARN",
@@ -343,11 +358,11 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "delete_protection": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_delete_protection_choice(),
             ),
             "delete_protection_state": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_severity_choice(
                     Title("Severity for delete protection mismatch"),
                     "WARN",
@@ -356,11 +371,11 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "snapshot_plan": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_snapshot_plan_choice(),
             ),
             "snapshot_plan_state": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_severity_choice(
                     Title("Severity for snapshot plan mismatch"),
                     "WARN",
@@ -369,7 +384,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "snapshot_limit_usage_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels[float](
                     title=Title("Snapshot limit usage"),
                     help_text=HELP_SNAPSHOT_LIMIT_USAGE,
@@ -384,7 +399,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "subaccount_limit_usage_levels": DictElement(
-                required=True,
+                required=False,
                 parameter_form=SimpleLevels[float](
                     title=Title("Subaccount limit usage"),
                     help_text=HELP_SUBACCOUNT_LIMIT_USAGE,
@@ -399,7 +414,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "status_state": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_severity_choice(
                     Title("Severity for non-active Storage Box status"),
                     "WARN",
@@ -407,7 +422,7 @@ def _check_parameter_form() -> Dictionary:
                 ),
             ),
             "api_error_state": DictElement(
-                required=True,
+                required=False,
                 parameter_form=_severity_choice(
                     Title("Severity for API collection errors"),
                     "UNKNOWN",

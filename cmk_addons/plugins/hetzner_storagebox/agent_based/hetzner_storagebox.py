@@ -12,6 +12,7 @@ from cmk.agent_based.v2 import AgentSection, CheckPlugin, Metric, Result, Servic
 ACTIVE_STATUSES = {"active", "available", "ok", "online", "ready", "running"}
 Levels = tuple[float, float]
 LevelViolation = tuple[State, float]
+DEFAULT_USAGE_LEVELS: Levels = (80.0, 90.0)
 ACCESS_SETTINGS = (
     ("expected_samba_access", ("access_settings", "samba_enabled"), "Samba"),
     ("expected_ssh_access", ("access_settings", "ssh_enabled"), "SSH"),
@@ -21,7 +22,6 @@ ACCESS_SETTINGS = (
 )
 EXPECTED_BOOL_VALUES = {"enabled": True, "disabled": False}
 MISSING = object()
-HIDDEN_DETAILS = " "
 
 
 class ErrorInfo(TypedDict):
@@ -274,8 +274,6 @@ def _text_before_state_marker(state: State, text: str) -> str:
 
 
 def _details_before_state_marker(state: State, details: str) -> str:
-    if details == HIDDEN_DETAILS:
-        return details
     return _text_before_state_marker(state, details)
 
 
@@ -355,9 +353,9 @@ def _display_field(text: str, state: State = State.OK, details: str | None = Non
 
 
 def _count_details(state: State, limit_usage_text: str | None) -> str | None:
-    if limit_usage_text is None:
+    if limit_usage_text is None or state == State.OK:
         return None
-    return HIDDEN_DETAILS if state == State.OK else limit_usage_text
+    return limit_usage_text
 
 
 def _metadata_results(
@@ -569,8 +567,9 @@ def _usage_levels(params: Mapping[str, Any]) -> Levels | None:
     if parsed_levels is not None or _is_no_levels(levels):
         return parsed_levels
 
-    warn = params.get("warn", params.get("usage_warn", 80.0))
-    crit = params.get("crit", params.get("usage_crit", 90.0))
+    default_warn, default_crit = DEFAULT_USAGE_LEVELS
+    warn = params.get("warn", params.get("usage_warn", default_warn))
+    crit = params.get("crit", params.get("usage_crit", default_crit))
     return (float(warn), float(crit))
 
 
@@ -707,7 +706,7 @@ check_plugin_hetzner_storagebox = CheckPlugin(
     discovery_function=discover_hetzner_storagebox,
     check_function=check_hetzner_storagebox,
     check_default_parameters={
-        "usage_levels": ("fixed", (80.0, 90.0)),
+        "usage_levels": ("fixed", DEFAULT_USAGE_LEVELS),
         "status_state": "WARN",
         "api_error_state": "UNKNOWN",
         "access_mismatch_state": "WARN",

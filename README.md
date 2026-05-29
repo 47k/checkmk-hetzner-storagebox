@@ -109,7 +109,7 @@ Default service parameter behavior:
 - API collection errors are UNKNOWN by default. This avoids turning API, authentication, or network reachability issues into CRIT unless you choose that policy explicitly.
 - API collection error severity is configurable as UNKNOWN, WARN, or CRIT.
 
-The service parameter ruleset includes options for storage usage, snapshot monitoring, subaccount monitoring, access settings, delete protection, snapshot plans, and limit usage.
+The service parameter ruleset keeps these tuning options checkbox-enabled: leave an option unchecked to use the default behavior, or enable it to edit that specific threshold, expectation, or severity.
 
 ## Example Output
 

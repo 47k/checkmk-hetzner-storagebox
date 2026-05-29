@@ -59,6 +59,34 @@ metric_subaccounts_count = metrics.Metric(
     color=metrics.Color.ORANGE,
 )
 
+metric_snapshot_limit = metrics.Metric(
+    name="snapshot_limit",
+    title=Title("Snapshot limit"),
+    unit=UNIT_COUNT,
+    color=metrics.Color.LIGHT_PURPLE,
+)
+
+metric_subaccounts_limit = metrics.Metric(
+    name="subaccounts_limit",
+    title=Title("Subaccount limit"),
+    unit=UNIT_COUNT,
+    color=metrics.Color.LIGHT_ORANGE,
+)
+
+metric_snapshot_limit_usage_percent = metrics.Metric(
+    name="snapshot_limit_usage_percent",
+    title=Title("Snapshot limit usage"),
+    unit=UNIT_PERCENT,
+    color=metrics.Color.DARK_PURPLE,
+)
+
+metric_subaccount_limit_usage_percent = metrics.Metric(
+    name="subaccount_limit_usage_percent",
+    title=Title("Subaccount limit usage"),
+    unit=UNIT_PERCENT,
+    color=metrics.Color.DARK_ORANGE,
+)
+
 
 graph_hetzner_storagebox_storage_usage = graphs.Graph(
     name="hetzner_storagebox_storage_usage",
@@ -91,10 +119,32 @@ graph_hetzner_storagebox_counts = graphs.Graph(
     title=Title("Storage Box counts"),
     simple_lines=(
         "snapshots_count",
+        "snapshot_limit",
         "subaccounts_count",
+        "subaccounts_limit",
     ),
     optional=(
         "snapshots_count",
+        "snapshot_limit",
         "subaccounts_count",
+        "subaccounts_limit",
+    ),
+)
+
+graph_hetzner_storagebox_limit_usage_percent = graphs.Graph(
+    name="hetzner_storagebox_limit_usage_percent",
+    title=Title("Storage Box limit usage percentage"),
+    minimal_range=graphs.MinimalRange(0, 100),
+    simple_lines=(
+        "snapshot_limit_usage_percent",
+        metrics.WarningOf("snapshot_limit_usage_percent"),
+        metrics.CriticalOf("snapshot_limit_usage_percent"),
+        "subaccount_limit_usage_percent",
+        metrics.WarningOf("subaccount_limit_usage_percent"),
+        metrics.CriticalOf("subaccount_limit_usage_percent"),
+    ),
+    optional=(
+        "snapshot_limit_usage_percent",
+        "subaccount_limit_usage_percent",
     ),
 )

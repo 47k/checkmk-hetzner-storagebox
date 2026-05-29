@@ -16,6 +16,9 @@ The package adds a Checkmk special agent, discovery, check plugin, WATO rulesets
 - Snapshot count
 - Subaccount count
 - Optional thresholds for snapshot size, snapshot count, and subaccount count
+- Optional access setting drift checks
+- Optional delete protection and snapshot plan checks
+- Optional snapshot and subaccount limit usage thresholds
 
 ## API Requirements
 
@@ -100,12 +103,13 @@ Default service parameter behavior:
 
 - Storage usage WARN at 80%, CRIT at 90%.
 - Snapshot size, snapshot count, and subaccount count thresholds are disabled unless configured.
+- Access setting drift, delete protection, snapshot plan, and limit usage checks are ignored unless configured.
 - Subaccount counts are fetched automatically from the Storage Box subaccounts API.
 - Non-active statuses are WARN.
 - API collection errors are UNKNOWN by default. This avoids turning API, authentication, or network reachability issues into CRIT unless you choose that policy explicitly.
 - API collection error severity is configurable as UNKNOWN, WARN, or CRIT.
 
-The service parameter ruleset includes options for storage usage, snapshot monitoring, and subaccount monitoring.
+The service parameter ruleset includes options for storage usage, snapshot monitoring, subaccount monitoring, access settings, delete protection, snapshot plans, and limit usage.
 
 ## Example Output
 
@@ -113,7 +117,7 @@ Special agent output uses one JSON payload inside a Checkmk section:
 
 ```text
 <<<hetzner_storagebox:sep(0)>>>
-{"storage_boxes":[{"id":12345,"username":"u12345","server":"fsn1-box1","status":"active","storage_box_type":{"name":"BX41","size":5497558138880},"stats":{"size":3485338895155,"size_data":3350074496614,"size_snapshots":135264398541},"subaccounts_count":6}],"errors":[]}
+{"storage_boxes":[{"id":12345,"username":"u12345","server":"fsn1-box1","status":"active","access_settings":{"samba_enabled":true,"ssh_enabled":false,"webdav_enabled":false,"zfs_enabled":false,"reachable_externally":true},"protection":{"delete":false},"snapshot_plan":null,"storage_box_type":{"name":"BX41","size":5497558138880,"snapshot_limit":20,"automatic_snapshot_limit":10,"subaccounts_limit":100},"stats":{"size":3485338895155,"size_data":3350074496614,"size_snapshots":135264398541},"subaccounts_count":6}],"errors":[]}
 ```
 
 On API or network errors, the agent still emits a valid section:
@@ -129,7 +133,7 @@ Expected service output:
 OK - Used 63.4% (3.17 TiB / 5.00 TiB), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
 ```
 
-The service details view uses multiline output:
+The service details view uses multiline output and includes additional informational fields when available:
 
 ```text
 Used 63.4% (3.17 TiB / 5.00 TiB)
@@ -137,12 +141,17 @@ Status: Active
 Snapshot size 126.00 GiB
 Snapshot count n/a
 Subaccounts 6
+Access: Samba enabled, SSH disabled, WebDAV disabled, ZFS disabled, External enabled
+Delete protection: disabled
+Snapshot plan: none
+Snapshot limit usage: n/a
+Subaccount limit usage: 6 / 100 (6.0%)
 ```
 
-With optional thresholds configured, exceeded values produce additional WARN/CRIT results and annotate the details:
+With optional thresholds or expectation checks configured, exceeded or mismatching values produce separate WARN/CRIT/UNKNOWN results so Checkmk can render native state markers:
 
 ```text
-WARN - Used 63.4% (3.17 TiB / 5.00 TiB), Status: Active, Snapshot size 120.00 GiB, Snapshot count 4, Subaccounts 6, Snapshot size: 120.00 GiB (WARN >= 100.00 GiB)
+WARN - Used 63.4% (3.17 TiB / 5.00 TiB), Status: Active, Snapshot size 120.00 GiB, Snapshot count 4, Subaccounts 95, Access settings mismatch, Delete protection mismatch, Snapshot plan mismatch, Subaccount limit usage: 95 / 100 (95.0%)
 ```
 
 Details:
@@ -150,9 +159,17 @@ Details:
 ```text
 Used 63.4% (3.17 TiB / 5.00 TiB)
 Status: Active
-Snapshot size: 120.00 GiB (WARN >= 100.00 GiB)
+Snapshot size 120.00 GiB
 Snapshot count 4
-Subaccounts 6
+Subaccounts 95
+Access: Samba enabled, SSH enabled, WebDAV disabled, ZFS disabled, External enabled
+Expected SSH: disabled
+Delete protection: disabled
+Expected delete protection: enabled
+Snapshot plan: none
+Expected snapshot plan: configured
+Snapshot limit usage: 4 / 20 (20.0%)
+Subaccount limit usage: 95 / 100 (95.0%)
 ```
 
 Discovery creates one service per returned Storage Box. It does not create a standalone API service:
@@ -186,9 +203,13 @@ Each Storage Box service can emit the following perfdata when the API provides t
 - `snapshots_bytes`
 - `snapshots_count`
 - `subaccounts_count`
+- `snapshot_limit`
+- `subaccounts_limit`
+- `snapshot_limit_usage_percent`
+- `subaccount_limit_usage_percent`
 
 Byte values are rendered in human-readable binary units such as GiB and TiB in the service summary.
-When thresholds for snapshot size, snapshot count, or subaccount count are configured, the corresponding metric includes WARN/CRIT levels.
+When thresholds for snapshot size, snapshot count, subaccount count, snapshot limit usage, or subaccount limit usage are configured, the corresponding metric includes WARN/CRIT levels.
 
 ## Security
 
@@ -199,8 +220,10 @@ When thresholds for snapshot size, snapshot count, or subaccount count are confi
 
 ## Limitations
 
-- The plugin depends on fields returned by `GET /storage_boxes`. Missing fields are handled gracefully, but missing storage size fields make usage evaluation UNKNOWN.
+- The plugin depends on fields returned by `GET /storage_boxes`. Missing fields are handled gracefully. Missing storage size fields make usage evaluation UNKNOWN; optional metadata fields are shown as `n/a` and do not alert.
 - `subaccounts_count` is not inferred from `GET /storage_boxes` or from `subaccounts_limit`. It is counted from `GET /storage_boxes/{id}/subaccounts` when subaccount fetching is enabled and the endpoint is available.
+- Snapshot limit usage is only calculated when `snapshots_count` and `storage_box_type.snapshot_limit` are available and the limit is greater than zero.
+- Subaccount limit usage is only calculated when `subaccounts_count` and `storage_box_type.subaccounts_limit` are available and the limit is greater than zero.
 - Size metrics are interpreted as bytes, matching the Checkmk metric names and output units.
 - The plugin monitors Storage Box metadata and capacity usage only. It does not test protocol-level access such as SSH, SFTP, SMB, Borg, or WebDAV.
 - Filtering is by Storage Box ID, not username.

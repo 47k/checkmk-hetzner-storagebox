@@ -71,7 +71,7 @@ curl -sS \
 Build or download the MKP package, then install it as the Checkmk site user:
 
 ```bash
-mkp add hetzner_storagebox-0.1.0.mkp
+mkp add hetzner_storagebox-0.1.2.mkp
 mkp enable hetzner_storagebox
 cmk -R
 ```
@@ -90,7 +90,7 @@ cmk -R
 
 ## Checkmk Setup
 
-1. Go to Setup > Agents > Other integrations.
+1. Go to Setup > Agents > Other integrations > Applications.
 2. Create a rule for `Hetzner Storage Box`.
 3. Enter the Hetzner Console API token in the password field.
 4. Keep the API URL as `https://api.hetzner.com/v1` unless you have a compatible override.
@@ -227,6 +227,8 @@ When thresholds for snapshot size, snapshot count, subaccount count, snapshot li
 - Size metrics are interpreted as bytes, matching the Checkmk metric names and output units.
 - The plugin monitors Storage Box metadata and capacity usage only. It does not test protocol-level access such as SSH, SFTP, SMB, Borg, or WebDAV.
 - Filtering is by Storage Box ID, not username.
+
+These limitations describe the intended scope of the 0.1.2 release.
 
 ## Author
 

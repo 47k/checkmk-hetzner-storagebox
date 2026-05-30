@@ -1,7 +1,8 @@
 # checkmk-hetzner-storagebox
 
-![License](https://img.shields.io/badge/license-Apache-2.0-blue)
-![Checkmk](https://img.shields.io/badge/Checkmk-2.x-green)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
+![Checkmk](https://img.shields.io/badge/Tested%20with-Checkmk%202.4.0-green)
+![Release](https://img.shields.io/github/v/release/47k/checkmk-hetzner-storagebox)
 ![Status](https://img.shields.io/badge/status-beta-orange)
 
 Checkmk 2.x MKP plugin for monitoring Hetzner Storage Boxes through the Hetzner Console API.

@@ -204,6 +204,15 @@ curl -sS \
   https://api.hetzner.com/v1/storage_boxes/12345/subaccounts
 ```
 
+---
+
+## Screenshot(s) ##
+<img width="916" height="218" alt="1" src="https://github.com/user-attachments/assets/23df19a4-755c-4855-a2fa-f0ff277a1e02" />
+<img width="1091" height="353" alt="2" src="https://github.com/user-attachments/assets/8eab6d70-24b1-4711-a16a-083dec386e8b" />
+<img width="1369" height="2421" alt="3" src="https://github.com/user-attachments/assets/3903f988-fc9a-487d-bb37-2d53c6853b4b" />
+
+---
+
 ## Error Handling
 
 On API or network errors, the agent still emits a valid section:

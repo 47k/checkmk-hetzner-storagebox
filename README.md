@@ -6,7 +6,7 @@
 
 Checkmk 2.x MKP plugin for monitoring Hetzner Storage Boxes through the Hetzner Console API.
 
-## Purpose
+## Overview
 
 The package adds a Checkmk special agent, discovery, check plugin, WATO rulesets, and metrics for Hetzner Storage Boxes. It discovers one service per Storage Box and monitors:
 
@@ -19,6 +19,8 @@ The package adds a Checkmk special agent, discovery, check plugin, WATO rulesets
 - Optional access setting drift checks
 - Optional delete protection and snapshot plan checks
 - Optional snapshot and subaccount limit usage thresholds
+
+All monitoring is performed server-side using a Checkmk Special Agent.
 
 ## API Requirements
 
@@ -46,35 +48,17 @@ Authorization: Bearer <api_token>
 
 The agent follows `meta.pagination` / `pagination` information when the API returns paginated responses for Storage Boxes and subaccounts.
 
-## API Test
+## Installation (MKP - Recommended)
 
-You can test the token outside Checkmk with:
-
-```bash
-curl -sS \
-  -H "Authorization: Bearer $HETZNER_API_TOKEN" \
-  -H "Accept: application/json" \
-  https://api.hetzner.com/v1/storage_boxes
-```
-
-Subaccount counting can be tested for one Storage Box ID with:
-
-```bash
-curl -sS \
-  -H "Authorization: Bearer $HETZNER_API_TOKEN" \
-  -H "Accept: application/json" \
-  https://api.hetzner.com/v1/storage_boxes/12345/subaccounts
-```
-
-## Installation
-
-Build or download the MKP package, then install it as the Checkmk site user:
+Build or download the `.mkp` package, then install it as the Checkmk site user:
 
 ```bash
 mkp add hetzner_storagebox-0.1.2.mkp
 mkp enable hetzner_storagebox
 cmk -R
 ```
+
+## Manual Installation
 
 For manual development installs, copy the `cmk_addons/plugins/hetzner_storagebox` tree into:
 
@@ -88,7 +72,11 @@ Then reload Checkmk:
 cmk -R
 ```
 
-## Checkmk Setup
+## Rule Configuration
+
+### Special Agent Rule
+
+Rule name: `Hetzner Storage Box`
 
 1. Go to Setup > Agents > Other integrations > Applications.
 2. Create a rule for `Hetzner Storage Box`.
@@ -98,6 +86,10 @@ cmk -R
 6. Optionally restrict monitoring to selected Storage Box IDs.
 7. Run service discovery on the target Checkmk host.
 8. Optionally tune `Hetzner Storage Box` service parameters.
+
+### Check Parameters Rule
+
+Rule name: `Hetzner Storage Box`
 
 Default service parameter behavior:
 
@@ -111,7 +103,26 @@ Default service parameter behavior:
 
 The service parameter ruleset keeps these tuning options checkbox-enabled: leave an option unchecked to use the default behavior, or enable it to edit that specific threshold, expectation, or severity.
 
-## Example Output
+## Metrics
+
+Each Storage Box service can emit the following perfdata when the API provides the corresponding fields:
+
+- `used_bytes`
+- `total_bytes`
+- `used_percent`
+- `data_bytes`
+- `snapshots_bytes`
+- `snapshots_count`
+- `subaccounts_count`
+- `snapshot_limit`
+- `subaccounts_limit`
+- `snapshot_limit_usage_percent`
+- `subaccount_limit_usage_percent`
+
+Byte values are rendered in human-readable binary units such as GiB and TiB in the service summary.
+When thresholds for snapshot size, snapshot count, subaccount count, snapshot limit usage, or subaccount limit usage are configured, the corresponding metric includes WARN/CRIT levels.
+
+## Example Special Agent Output
 
 Special agent output uses one JSON payload inside a Checkmk section:
 
@@ -120,12 +131,7 @@ Special agent output uses one JSON payload inside a Checkmk section:
 {"storage_boxes":[{"id":12345,"username":"u12345","server":"fsn1-box1","status":"active","access_settings":{"samba_enabled":true,"ssh_enabled":false,"webdav_enabled":false,"zfs_enabled":false,"reachable_externally":true},"protection":{"delete":false},"snapshot_plan":null,"storage_box_type":{"name":"BX41","size":5497558138880,"snapshot_limit":20,"automatic_snapshot_limit":10,"subaccounts_limit":100},"stats":{"size":3485338895155,"size_data":3350074496614,"size_snapshots":135264398541},"subaccounts_count":6}],"errors":[]}
 ```
 
-On API or network errors, the agent still emits a valid section:
-
-```text
-<<<hetzner_storagebox:sep(0)>>>
-{"storage_boxes":[],"errors":[{"code":"auth_error","message":"HTTP 401 Unauthorized while fetching https://api.hetzner.com/v1/storage_boxes"}]}
-```
+## Example Service Output
 
 Expected service output:
 
@@ -178,6 +184,35 @@ Discovery creates one service per returned Storage Box. It does not create a sta
 Hetzner Storage Box u12345
 ```
 
+## Example API Test
+
+You can test the token outside Checkmk with:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+  -H "Accept: application/json" \
+  https://api.hetzner.com/v1/storage_boxes
+```
+
+Subaccount counting can be tested for one Storage Box ID with:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+  -H "Accept: application/json" \
+  https://api.hetzner.com/v1/storage_boxes/12345/subaccounts
+```
+
+## Error Handling
+
+On API or network errors, the agent still emits a valid section:
+
+```text
+<<<hetzner_storagebox:sep(0)>>>
+{"storage_boxes":[],"errors":[{"code":"auth_error","message":"HTTP 401 Unauthorized while fetching https://api.hetzner.com/v1/storage_boxes"}]}
+```
+
 When the API returns partial data plus errors, each returned Storage Box service includes the API error at the configured severity. When no boxes can be returned because of an API error, discovery returns no new services. Already discovered Storage Box services remain stable and report the collection problem during check execution:
 
 ```text
@@ -191,25 +226,6 @@ If the API collection error severity is changed to CRIT, the same already discov
 Hetzner Storage Box u12345
 CRIT - API error (auth_error): HTTP 401 Unauthorized while fetching https://api.hetzner.com/v1/storage_boxes
 ```
-
-## Metrics
-
-Each Storage Box service can emit the following perfdata when the API provides the corresponding fields:
-
-- `used_bytes`
-- `total_bytes`
-- `used_percent`
-- `data_bytes`
-- `snapshots_bytes`
-- `snapshots_count`
-- `subaccounts_count`
-- `snapshot_limit`
-- `subaccounts_limit`
-- `snapshot_limit_usage_percent`
-- `subaccount_limit_usage_percent`
-
-Byte values are rendered in human-readable binary units such as GiB and TiB in the service summary.
-When thresholds for snapshot size, snapshot count, subaccount count, snapshot limit usage, or subaccount limit usage are configured, the corresponding metric includes WARN/CRIT levels.
 
 ## Security
 

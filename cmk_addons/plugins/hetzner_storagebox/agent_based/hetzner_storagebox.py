@@ -29,9 +29,21 @@ class ErrorInfo(TypedDict):
     message: str
 
 
+class CacheInfo(TypedDict, total=False):
+    enabled: bool
+    status: str
+    stale: bool
+    age_seconds: float
+    ttl_seconds: float
+    collected_at: float
+    message: str
+    error: str
+
+
 class Section(TypedDict):
     boxes: dict[str, dict[str, Any]]
     errors: list[ErrorInfo]
+    cache: CacheInfo | None
 
 
 class DisplayField(TypedDict):
@@ -42,32 +54,42 @@ class DisplayField(TypedDict):
 
 def parse_hetzner_storagebox(string_table: list[list[str]]) -> Section | None:
     if not string_table:
-        return {"boxes": {}, "errors": [{"code": "no_data", "message": "No agent data received"}]}
+        return {"boxes": {}, "errors": [{"code": "no_data", "message": "No agent data received"}], "cache": None}
 
     raw_payload = "".join(cell for row in string_table for cell in row).strip()
     if not raw_payload:
-        return {"boxes": {}, "errors": [{"code": "no_data", "message": "Empty agent section"}]}
+        return {"boxes": {}, "errors": [{"code": "no_data", "message": "Empty agent section"}], "cache": None}
 
     try:
         payload = json.loads(raw_payload)
     except json.JSONDecodeError as exc:
-        return {"boxes": {}, "errors": [{"code": "json_error", "message": f"Invalid JSON in agent section: {exc}"}]}
+        return {
+            "boxes": {},
+            "errors": [{"code": "json_error", "message": f"Invalid JSON in agent section: {exc}"}],
+            "cache": None,
+        }
 
     if not isinstance(payload, dict):
-        return {"boxes": {}, "errors": [{"code": "payload_error", "message": "Agent payload is not a JSON object"}]}
+        return {
+            "boxes": {},
+            "errors": [{"code": "payload_error", "message": "Agent payload is not a JSON object"}],
+            "cache": None,
+        }
 
     storage_boxes = payload.get("storage_boxes", [])
     errors = _normalize_errors(payload.get("errors", []))
+    cache = _normalize_cache(payload.get("cache"))
 
     if not isinstance(storage_boxes, list):
         return {
             "boxes": {},
             "errors": errors
             + [{"code": "payload_error", "message": "Agent payload field 'storage_boxes' is not a list"}],
+            "cache": cache,
         }
 
     boxes = _storage_boxes_by_item(storage_boxes)
-    return {"boxes": boxes, "errors": errors}
+    return {"boxes": boxes, "errors": errors, "cache": cache}
 
 
 def _normalize_errors(raw_errors: Any) -> list[ErrorInfo]:
@@ -86,6 +108,47 @@ def _normalize_errors(raw_errors: Any) -> list[ErrorInfo]:
             message = str(raw_error)
         errors.append({"code": code, "message": message})
     return errors
+
+
+def _normalize_cache(raw_cache: Any) -> CacheInfo | None:
+    if not isinstance(raw_cache, Mapping):
+        return None
+
+    cache: CacheInfo = {}
+    enabled = raw_cache.get("enabled")
+    if isinstance(enabled, bool):
+        cache["enabled"] = enabled
+
+    status = raw_cache.get("status")
+    if status not in (None, ""):
+        cache["status"] = str(status)
+
+    stale = raw_cache.get("stale")
+    if isinstance(stale, bool):
+        cache["stale"] = stale
+    elif stale is not None:
+        cache["stale"] = str(stale).strip().lower() in {"1", "true", "yes", "on", "stale"}
+
+    for source_key, target_key in (
+        ("age_seconds", "age_seconds"),
+        ("age", "age_seconds"),
+        ("ttl_seconds", "ttl_seconds"),
+        ("ttl", "ttl_seconds"),
+        ("collected_at", "collected_at"),
+    ):
+        number = _number_from_value(raw_cache.get(source_key))
+        if number is not None:
+            cache[target_key] = number
+
+    message = raw_cache.get("message")
+    if message not in (None, ""):
+        cache["message"] = str(message)
+
+    error = raw_cache.get("error")
+    if error not in (None, ""):
+        cache["error"] = str(error)
+
+    return cache or None
 
 
 def _storage_boxes_by_item(raw_storage_boxes: list[Any]) -> dict[str, dict[str, Any]]:
@@ -183,6 +246,7 @@ def check_hetzner_storagebox(item: str, params: Mapping[str, Any], section: Sect
     fields = _display_fields(
         status=status,
         status_state=status_state,
+        cache_info=section["cache"],
         used_bytes=used_bytes,
         total_bytes=total_bytes,
         usage_percent=usage_percent,
@@ -281,6 +345,7 @@ def _display_fields(
     *,
     status: str,
     status_state: State,
+    cache_info: CacheInfo | None,
     used_bytes: float | None,
     total_bytes: float | None,
     usage_percent: float | None,
@@ -307,6 +372,10 @@ def _display_fields(
         )
     else:
         parts.append(_display_field("Usage data incomplete", usage_state))
+
+    cache_field = _cache_display_field(cache_info)
+    if cache_field is not None:
+        parts.append(cache_field)
 
     parts.append(_display_field(f"Status: {_format_status(status)}", status_state))
 
@@ -350,6 +419,39 @@ def _display_fields(
 
 def _display_field(text: str, state: State = State.OK, details: str | None = None) -> DisplayField:
     return {"text": text, "details": text if details is None else details, "state": state}
+
+
+def _cache_display_field(cache_info: CacheInfo | None) -> DisplayField | None:
+    if cache_info is None:
+        return None
+
+    if cache_info.get("enabled") is False:
+        return _display_field("Cache disabled")
+
+    stale = bool(cache_info.get("stale", False))
+    freshness = "stale" if stale else "fresh"
+    state = State.WARN if stale else State.OK
+    status = _format_cache_status(cache_info.get("status"))
+    age = cache_info.get("age_seconds")
+    ttl = cache_info.get("ttl_seconds")
+
+    if age is None:
+        text = f"Cache status: {freshness}"
+    else:
+        text = f"Cache age {_format_duration(age)} ({freshness}"
+        if ttl is not None:
+            text += f", ttl {_format_duration(ttl)}"
+        text += ")"
+
+    details = text
+    if status:
+        details += f"\nCache source: {status}"
+    if cache_info.get("message"):
+        details += f"\n{cache_info['message']}"
+    if cache_info.get("error"):
+        details += f"\nFresh collection error: {cache_info['error']}"
+
+    return _display_field(text, state, details)
 
 
 def _count_details(state: State, limit_usage_text: str | None) -> str | None:
@@ -612,7 +714,10 @@ def _violation_state(violation: LevelViolation | None) -> State:
 
 def _number_at(data: Mapping[str, Any], path: tuple[str, ...]) -> float | None:
     value = _value_at(data, path)
+    return _number_from_value(value)
 
+
+def _number_from_value(value: Any) -> float | None:
     if value is MISSING or isinstance(value, bool) or value in (None, ""):
         return None
     try:
@@ -698,6 +803,26 @@ def _format_enabled(value: bool | None) -> str:
     if value is None:
         return "n/a"
     return "enabled" if value else "disabled"
+
+
+def _format_cache_status(status: str | None) -> str:
+    if not status:
+        return ""
+    return " ".join(part.capitalize() for part in status.replace("_", " ").replace("-", " ").split())
+
+
+def _format_duration(value: float) -> str:
+    seconds = int(max(0.0, float(value)))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining_seconds}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h {remaining_minutes}m"
+    days, remaining_hours = divmod(hours, 24)
+    return f"{days}d {remaining_hours}h"
 
 
 check_plugin_hetzner_storagebox = CheckPlugin(

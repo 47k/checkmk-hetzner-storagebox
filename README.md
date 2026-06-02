@@ -85,8 +85,9 @@ Rule name: `Hetzner Storage Box`
 4. Keep the API URL as `https://api.hetzner.com/v1` unless you have a compatible override.
 5. Set the timeout if needed.
 6. Optionally restrict monitoring to selected Storage Box IDs.
-7. Run service discovery on the target Checkmk host.
-8. Optionally tune `Hetzner Storage Box` service parameters.
+7. Keep the result cache enabled unless you explicitly need uncached collection. The default TTL is 3600 seconds, and stale cache fallback on collection errors is enabled by default.
+8. Run service discovery on the target Checkmk host.
+9. Optionally tune `Hetzner Storage Box` service parameters.
 
 ### Check Parameters Rule
 
@@ -101,6 +102,7 @@ Default service parameter behavior:
 - Non-active statuses are WARN.
 - API collection errors are UNKNOWN by default. This avoids turning API, authentication, or network reachability issues into CRIT unless you choose that policy explicitly.
 - API collection error severity is configurable as UNKNOWN, WARN, or CRIT.
+- Cache freshness is reported by every discovered Storage Box service. Stale cached data is never hidden, and storage usage thresholds are evaluated against whichever dataset the agent returned, fresh or cached.
 
 The service parameter ruleset keeps these tuning options checkbox-enabled: leave an option unchecked to use the default behavior, or enable it to edit that specific threshold, expectation, or severity.
 
@@ -129,7 +131,7 @@ Special agent output uses one JSON payload inside a Checkmk section:
 
 ```text
 <<<hetzner_storagebox:sep(0)>>>
-{"storage_boxes":[{"id":12345,"username":"u12345","server":"fsn1-box1","status":"active","access_settings":{"samba_enabled":true,"ssh_enabled":false,"webdav_enabled":false,"zfs_enabled":false,"reachable_externally":true},"protection":{"delete":false},"snapshot_plan":null,"storage_box_type":{"name":"BX41","size":5497558138880,"snapshot_limit":20,"automatic_snapshot_limit":10,"subaccounts_limit":100},"stats":{"size":3485338895155,"size_data":3350074496614,"size_snapshots":135264398541},"subaccounts_count":6}],"errors":[]}
+{"cache":{"age_seconds":0,"enabled":true,"message":"fresh collection stored in result cache (age 0s, ttl 3600s)","stale":false,"status":"refresh","ttl_seconds":3600},"storage_boxes":[{"id":12345,"username":"u12345","server":"fsn1-box1","status":"active","access_settings":{"samba_enabled":true,"ssh_enabled":false,"webdav_enabled":false,"zfs_enabled":false,"reachable_externally":true},"protection":{"delete":false},"snapshot_plan":null,"storage_box_type":{"name":"BX41","size":5497558138880,"snapshot_limit":20,"automatic_snapshot_limit":10,"subaccounts_limit":100},"stats":{"size":3485338895155,"size_data":3350074496614,"size_snapshots":135264398541},"subaccounts_count":6}],"errors":[]}
 ```
 
 ## Example Service Output
@@ -137,13 +139,14 @@ Special agent output uses one JSON payload inside a Checkmk section:
 Expected service output:
 
 ```text
-OK - Used 63.4% (3.17 TiB / 5.00 TiB), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
+OK - Used 63.4% (3.17 TiB / 5.00 TiB), Cache age 0s (fresh, ttl 1h 0m), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
 ```
 
 The service details view uses multiline output and includes additional informational fields when available:
 
 ```text
 Used 63.4% (3.17 TiB / 5.00 TiB)
+Cache age 0s (fresh, ttl 1h 0m)
 Status: Active
 Snapshot size 126.00 GiB
 Snapshot count n/a
@@ -153,6 +156,21 @@ Delete protection: disabled
 Snapshot plan: none
 Snapshot limit usage: n/a
 Subaccount limit usage: 6 / 100 (6.0%)
+```
+
+When stale cache fallback is used after a failed fresh collection, the cached dataset is still evaluated normally and the cache status is visible in the summary and details:
+
+```text
+WARN - Used 63.4% (3.17 TiB / 5.00 TiB), Cache age 1h 15m (stale, ttl 1h 0m), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
+```
+
+Details include the cache source and refresh error:
+
+```text
+Cache age 1h 15m (stale, ttl 1h 0m)
+Cache source: Stale On Error
+stale result cache used after refresh failure (age 4500s, ttl 3600s)
+Fresh collection error: auth_error: HTTP 401 Unauthorized while fetching https://api.hetzner.com/v1/storage_boxes
 ```
 
 With optional thresholds or expectation checks configured, exceeded or mismatching values produce separate WARN/CRIT/UNKNOWN results so Checkmk can render native state markers:

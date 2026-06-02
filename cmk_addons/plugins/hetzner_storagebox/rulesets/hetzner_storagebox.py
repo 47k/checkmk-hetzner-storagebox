@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from cmk.gui import valuespec as legacy_valuespecs
+from cmk.gui.form_specs.private import LegacyValueSpec
 from cmk.rulesets.v1 import Help, Label, Title
 from cmk.rulesets.v1.form_specs import (
     DataSize,
@@ -27,6 +31,14 @@ from cmk.rulesets.v1.form_specs import (
 from cmk.rulesets.v1.rule_specs import CheckParameters, HostAndItemCondition, SpecialAgent, Topic
 
 DEFAULT_API_URL = "https://api.hetzner.com/v1"
+DEFAULT_CACHE_TTL_SECONDS = 3600
+
+RESULT_CACHE_HELP = (
+    "Cache normalized special-agent collection results in the site-local "
+    "var/check_mk/cache/hetzner_storagebox/ directory. This reduces repeated Hetzner API calls when "
+    "Checkmk runs the data source more often than Storage Box usage needs to be refreshed. "
+    "Expired cache and lock files older than 30 days are automatically removed by the special agent."
+)
 
 HELP_STORAGE_USAGE_LEVELS = Help(
     "Monitors the used Storage Box capacity in percent. The value is calculated from "
@@ -100,12 +112,194 @@ HELP_API_ERROR_STATE = Help(
 )
 
 
+def _cache_ttl_value(value: object) -> int:
+    if isinstance(value, bool) or value is None:
+        return DEFAULT_CACHE_TTL_SECONDS
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    if isinstance(value, str):
+        try:
+            return max(0, int(float(value.strip())))
+        except ValueError:
+            return DEFAULT_CACHE_TTL_SECONDS
+    return DEFAULT_CACHE_TTL_SECONDS
+
+
+def _cache_bool_value(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return bool(value)
+
+
+def _migrate_cache_enabled(
+    value: object,
+    legacy_ttl: object = None,
+    legacy_stale_on_error: object = None,
+) -> dict[str, object] | bool:
+    stale_on_error = _cache_bool_value(legacy_stale_on_error, True)
+
+    if isinstance(value, tuple) and len(value) == 2:
+        choice, nested_value = value
+        if _cache_bool_value(choice, True) is False:
+            return False
+        if not isinstance(nested_value, dict):
+            nested_value = {}
+        return {
+            "cache_ttl": _cache_ttl_value(nested_value.get("cache_ttl", nested_value.get("ttl", legacy_ttl))),
+            "cache_stale_on_error": _cache_bool_value(
+                nested_value.get("cache_stale_on_error", nested_value.get("stale_on_error", stale_on_error)),
+                True,
+            ),
+        }
+
+    if not isinstance(value, dict) and _cache_bool_value(value, True) is False:
+        return False
+
+    if isinstance(value, dict):
+        enabled = value.get("enabled", value.get("cache_enabled"))
+        if enabled is not None and _cache_bool_value(enabled, True) is False:
+            return False
+        return {
+            "cache_ttl": _cache_ttl_value(value.get("cache_ttl", value.get("ttl", legacy_ttl))),
+            "cache_stale_on_error": _cache_bool_value(
+                value.get("cache_stale_on_error", value.get("stale_on_error", stale_on_error)),
+                True,
+            ),
+        }
+
+    return {
+        "cache_ttl": _cache_ttl_value(legacy_ttl),
+        "cache_stale_on_error": stale_on_error,
+    }
+
+
+def _migrate_integration_params(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"cache_enabled": _migrate_cache_enabled(True)}
+
+    migrated = dict(value)
+    legacy_cache_group = migrated.pop("cache", None)
+    legacy_ttl = migrated.pop("cache_ttl", None)
+    legacy_stale_on_error = migrated.pop("cache_stale_on_error", None)
+    migrated["cache_enabled"] = _migrate_cache_enabled(
+        migrated.get("cache_enabled", legacy_cache_group if legacy_cache_group is not None else True),
+        legacy_ttl,
+        legacy_stale_on_error,
+    )
+    return migrated
+
+
+class _ResultCacheValueSpec(legacy_valuespecs.ValueSpec[Any]):
+    def __init__(self) -> None:
+        super().__init__(title="Result cache", help=RESULT_CACHE_HELP)
+        self._editor = legacy_valuespecs.Dictionary(
+            elements=[
+                (
+                    "cache_ttl",
+                    legacy_valuespecs.Integer(
+                        title="Result cache TTL",
+                        help="Cache validity in seconds. Default: 3600 seconds (1 hour).",
+                        unit="seconds",
+                        default_value=DEFAULT_CACHE_TTL_SECONDS,
+                        minvalue=0,
+                    ),
+                ),
+                (
+                    "cache_stale_on_error",
+                    legacy_valuespecs.Checkbox(
+                        label="Use stale cache on collection error",
+                        help=(
+                            "If fresh Hetzner API collection fails after the cache has expired, emit the stale "
+                            "cached payload with visible cache status instead of returning only the collection error. "
+                            "Storage usage thresholds are still evaluated against the returned cached dataset."
+                        ),
+                        default_value=True,
+                    ),
+                ),
+            ],
+            required_keys=["cache_ttl", "cache_stale_on_error"],
+        )
+
+    def _normalized_value(self, value: object) -> dict[str, object]:
+        if isinstance(value, dict):
+            return {
+                "cache_ttl": _cache_ttl_value(value.get("cache_ttl", value.get("ttl"))),
+                "cache_stale_on_error": _cache_bool_value(
+                    value.get("cache_stale_on_error", value.get("stale_on_error")),
+                    True,
+                ),
+            }
+        return {
+            "cache_ttl": DEFAULT_CACHE_TTL_SECONDS,
+            "cache_stale_on_error": True,
+        }
+
+    def canonical_value(self) -> dict[str, object]:
+        return self._normalized_value({})
+
+    def render_input(self, varprefix: str, value: object) -> None:
+        self._editor.render_input(varprefix, self._normalized_value(value))
+
+    def mask(self, value: object) -> dict[str, object]:
+        return self._normalized_value(value)
+
+    def value_to_html(self, value: object) -> str:
+        if not isinstance(value, dict):
+            return "disabled"
+
+        normalized = self._normalized_value(value)
+        ttl = normalized["cache_ttl"]
+        stale = "on" if normalized["cache_stale_on_error"] else "off"
+        return f"TTL: {ttl} seconds, stale on collection error: {stale}"
+
+    def value_to_json(self, value: object) -> dict[str, object]:
+        return self._normalized_value(value)
+
+    def value_from_json(self, json_value: object) -> dict[str, object]:
+        return self._normalized_value(json_value)
+
+    def from_html_vars(self, varprefix: str) -> dict[str, object]:
+        return self._normalized_value(self._editor.from_html_vars(varprefix))
+
+    def validate_datatype(self, value: object, varprefix: str) -> None:
+        if isinstance(value, dict):
+            self._editor.validate_datatype(self._normalized_value(value), varprefix)
+
+    def _validate_value(self, value: object, varprefix: str) -> None:
+        if isinstance(value, dict):
+            self._editor.validate_value(self._normalized_value(value), varprefix)
+
+
+def _result_cache_form() -> LegacyValueSpec:
+    return LegacyValueSpec(
+        title=Title("Result cache"),
+        help_text=Help(RESULT_CACHE_HELP),
+        valuespec=_ResultCacheValueSpec(),
+    )
+
+
 def _special_agent_parameter_form() -> Dictionary:
     return Dictionary(
         title=Title("Hetzner Storage Box"),
+        migrate=_migrate_integration_params,
         help_text=Help(
             "Configure access to the Hetzner Console API for Storage Box monitoring. "
-            "Use a Console API token and the API base URL https://api.hetzner.com/v1."
+            "Use a Console API token and the API base URL https://api.hetzner.com/v1.<br>"
+            "<br>"
+            "<b>Result cache</b><br>"
+            "The special agent result cache is enabled by default with a conservative TTL of "
+            "3600 seconds. This avoids repeated API calls when Checkmk executes the special agent "
+            "more often than Storage Box usage needs to be refreshed. Stale cached data can be "
+            "used on collection errors and is always shown in the service output with cache age "
+            "and stale/fresh status."
         ),
         elements={
             "api_token": DictElement(
@@ -146,7 +340,12 @@ def _special_agent_parameter_form() -> Dictionary:
                     remove_element_label=Label("Remove"),
                 ),
             ),
+            "cache_enabled": DictElement(
+                required=False,
+                parameter_form=_result_cache_form(),
+            ),
         },
+        ignored_elements=("cache", "cache_ttl", "cache_stale_on_error", "result_cache"),
     )
 
 

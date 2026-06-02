@@ -85,9 +85,28 @@ Rule name: `Hetzner Storage Box`
 4. Keep the API URL as `https://api.hetzner.com/v1` unless you have a compatible override.
 5. Set the timeout if needed.
 6. Optionally restrict monitoring to selected Storage Box IDs.
-7. Keep the result cache enabled unless you explicitly need uncached collection. The default TTL is 3600 seconds, and stale cache fallback on collection errors is enabled by default.
+7. Adjust the result cache settings if needed.
 8. Run service discovery on the target Checkmk host.
 9. Optionally tune `Hetzner Storage Box` service parameters.
+
+### Result Cache
+
+The special agent has a built-in result cache for Hetzner API responses. The cache is maintained on the agent side and reduces API load when Checkmk executes the special agent frequently. This is important because a longer service check interval does not necessarily reduce how often the Checkmk data source runs the special agent.
+
+Result cache settings are configured in the `Hetzner Storage Box` special agent rule.
+
+Default result cache behavior:
+
+- Result cache is enabled by default.
+- Result cache TTL is 3600 seconds (1 hour).
+- Stale cache fallback on collection errors is enabled by default.
+- Expired cache and lock files older than 30 days are cleaned up automatically by the special agent.
+
+When the cache is fresh, the agent returns the cached API response and skips a new Hetzner API collection. When the cache has expired, the agent tries to refresh it from the Hetzner API.
+
+If the Hetzner API is unavailable during refresh and stale cache fallback is enabled, the agent returns the last usable cached dataset instead of returning only the collection error. Stale data is never hidden: every Storage Box service reports the cache age and whether the returned dataset is fresh or stale.
+
+Storage usage thresholds are still evaluated against the returned dataset, including stale cached data. For example, a stale cached dataset with usage above the CRIT threshold still produces a CRIT storage usage result.
 
 ### Check Parameters Rule
 
@@ -136,7 +155,7 @@ Special agent output uses one JSON payload inside a Checkmk section:
 
 ## Example Service Output
 
-Expected service output:
+Fresh cache:
 
 ```text
 OK - Used 63.4% (3.17 TiB / 5.00 TiB), Cache age 0s (fresh, ttl 1h 0m), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
@@ -158,7 +177,7 @@ Snapshot limit usage: n/a
 Subaccount limit usage: 6 / 100 (6.0%)
 ```
 
-When stale cache fallback is used after a failed fresh collection, the cached dataset is still evaluated normally and the cache status is visible in the summary and details:
+Stale cache:
 
 ```text
 WARN - Used 63.4% (3.17 TiB / 5.00 TiB), Cache age 1h 15m (stale, ttl 1h 0m), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
@@ -172,6 +191,14 @@ Cache source: Stale On Error
 stale result cache used after refresh failure (age 4500s, ttl 3600s)
 Fresh collection error: auth_error: HTTP 401 Unauthorized while fetching https://api.hetzner.com/v1/storage_boxes
 ```
+
+Stale cache with CRIT storage usage:
+
+```text
+CRIT - Used 91.0% (4.55 TiB / 5.00 TiB), Cache age 1h 15m (stale, ttl 1h 0m), Status: Active, Snapshot size 126.00 GiB, Snapshot count n/a, Subaccounts 6
+```
+
+The CRIT state comes from the storage usage threshold evaluation. The dataset is stale, but the usage thresholds are still checked against the cached values returned by the agent.
 
 With optional thresholds or expectation checks configured, exceeded or mismatching values produce separate WARN/CRIT/UNKNOWN results so Checkmk can render native state markers:
 
